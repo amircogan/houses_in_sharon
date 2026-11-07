@@ -1,0 +1,17 @@
+[
+  {
+    "source": "source-with-permission",
+    "source_id": "example-123",
+    "url": "https://example.org/listing/example-123",
+    "title": "בית פרטי לדוגמה — להמחשת מבנה הנתונים בלבד",
+    "city": "בצרה",
+    "address": "",
+    "property_type": "בית פרטי",
+    "price": 20000,
+    "rooms": 5,
+    "built_sqm": 210,
+    "lot_sqm": 500,
+    "description": "דוגמת נתונים, אינה מודעה אמיתית. יש להזין רק מודעות ממקורות בעלי הרשאה.",
+    "images": []
+  }
+]
