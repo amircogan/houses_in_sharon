@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import urlsplit
+from sources import configured_sources
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
@@ -147,26 +148,42 @@ def read_feed_file(path):
     return data['listings'] if isinstance(data, dict) else data
 
 
+SCAN_LOCK = threading.Lock()
+
+
 def collect():
-    """Scheduled local collector hook. Drop a permitted source export in feeds/ as JSON."""
-    folder = ROOT / 'feeds'
-    files = sorted(folder.glob('*.json')) if folder.exists() else []
-    outcome = {'added':0,'updated':0,'skipped':0,'sources':len(files)}
-    for feed in files:
-        started = now().isoformat(timespec='seconds')
-        try:
-            items = read_feed_file(feed)
-            result = upsert_many(items)
-            for k in ('added','updated','skipped'):
-                outcome[k] += result[k]
+    """Import configured permitted sources independently; never send email."""
+    if not SCAN_LOCK.acquire(blocking=False):
+        raise HTTPException(409, 'Search already running')
+    try:
+        folder = ROOT / 'feeds'
+        sources = [(f.name, lambda f=f: read_feed_file(f)) for f in sorted(folder.glob('*.json'))]
+        sources.extend(configured_sources())
+        outcome = dict(added=0, updated=0, skipped=0, sources=len(sources), errors=[])
+        for name, fetch in sources:
+            started = now().isoformat(timespec='seconds')
+            try:
+                items = fetch()
+                if not isinstance(items, list):
+                    raise ValueError('Expected a listing array')
+                result = upsert_many(items)
+                for k in ('added', 'updated', 'skipped'):
+                    outcome[k] += result[k]
+                status, details = 'ok', ''
+            except Exception:
+                # Remote errors may contain credentials or signed URLs.
+                result = dict(added=0, updated=0)
+                status, details = 'error', 'Source request or data validation failed'
+                outcome['errors'].append({'source': name, 'message': details})
             with db() as conn:
-                conn.execute('INSERT INTO runs(start_time,finish_time,source,added,updated,status) VALUES (?,?,?,?,?,?)',
-                             (started,now().isoformat(timespec='seconds'),feed.name,result['added'],result['updated'],'ok'))
-        except Exception as exc:
-            with db() as conn:
-                conn.execute('INSERT INTO runs(start_time,finish_time,source,status,details) VALUES (?,?,?,?,?)',
-                             (started,now().isoformat(timespec='seconds'),feed.name,'error',str(exc)[:500]))
-    return outcome
+                conn.execute('INSERT INTO runs(start_time,finish_time,source,added,updated,status,details) VALUES (?,?,?,?,?,?,?)',
+                             (started, now().isoformat(timespec='seconds'), name, result['added'], result['updated'], status, details))
+        with db() as conn:
+            conn.execute('INSERT INTO runs(start_time,finish_time,source,added,updated,status) VALUES (?,?,?,?,?,?)',
+                         (now().isoformat(timespec='seconds'), now().isoformat(timespec='seconds'), 'search', outcome['added'], outcome['updated'], 'partial' if outcome['errors'] else 'ok'))
+        return outcome
+    finally:
+        SCAN_LOCK.release()
 
 
 def previous_day_bounds(reference=None):
@@ -176,6 +193,8 @@ def previous_day_bounds(reference=None):
 
 
 def send_digest(reference=None):
+    if os.getenv('ENABLE_EMAIL_DELIVERY') != '1':
+        return {'status': 'disabled'}
     day, start, end = previous_day_bounds(reference)
     with db() as conn:
         if conn.execute('SELECT date FROM digest_log WHERE date=?',(day.isoformat(),)).fetchone():
@@ -222,7 +241,7 @@ def scheduler_loop():
                 collect()
                 with db() as conn:
                     conn.execute("UPDATE runs SET status='ok', finish_time=? WHERE id=(SELECT max(id) FROM runs WHERE source='daily')",(now().isoformat(timespec='seconds'),))
-            if local.hour >= 8:
+            if local.hour >= 8 and os.getenv('ENABLE_EMAIL_DELIVERY') == '1':
                 try:
                     send_digest()
                 except Exception as exc:
@@ -262,7 +281,7 @@ def homes(show: str = 'active', search: str = '', _: bool = Depends(credentials)
 
 def last_scan():
     with db() as conn:
-        row = conn.execute("SELECT start_time,finish_time,status,added FROM runs WHERE source='daily' ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute("SELECT start_time,finish_time,status,added FROM runs WHERE source IN ('daily','search') ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
 
@@ -301,7 +320,7 @@ def scan(_:bool = Depends(credentials)):
 
 @app.get('/api/status')
 def status(_:bool = Depends(credentials)):
-    return {'last_scan':last_scan(), 'configured_feed_files':len(list((ROOT/'feeds').glob('*.json'))) if (ROOT/'feeds').exists() else 0, 'scheduler_enabled':os.getenv('ENABLE_SCHEDULER')=='1', 'site_configured':bool(os.getenv('SITE_URL'))}
+    return {'last_scan':last_scan(), 'configured_feed_files':len(list((ROOT/'feeds').glob('*.json'))) if (ROOT/'feeds').exists() else 0, 'scheduler_enabled':os.getenv('ENABLE_SCHEDULER')=='1', 'email_enabled':os.getenv('ENABLE_EMAIL_DELIVERY')=='1', 'site_configured':bool(os.getenv('SITE_URL'))}
 
 
 @app.post('/api/digest-test')
