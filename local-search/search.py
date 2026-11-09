@@ -1,4 +1,4 @@
-"""Visible local rental search. Yad2 adapter; Madlan requires verified selectors."""
+"""Visible local rental search for Yad2 and Komo. Madlan remains unverified."""
 import argparse
 import base64
 import getpass
@@ -7,9 +7,10 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 import yad2
+import komo
 
 ROOT = Path(__file__).resolve().parent
 
@@ -20,8 +21,10 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def check_url(url, source):
-    domain = {'yad2': 'yad2.co.il', 'madlan': 'madlan.co.il'}[source]
+    domain = {'yad2': 'yad2.co.il', 'madlan': 'madlan.co.il', 'komo': 'komo.co.il'}[source]
     parts = urlsplit(url)
+    if source == 'komo' and parts.hostname == 'account.komo.co.il':
+        raise ValueError('Komo requires manual sign-in. Use --capture komo to sign in, then retry.')
     if parts.scheme != 'https' or parts.hostname not in (domain, 'www.' + domain):
         raise ValueError('Expected HTTPS URL on ' + domain)
     if parts.username or parts.password:
@@ -51,6 +54,13 @@ def listing_url(href, source, page_url):
     if not href:
         raise ValueError('Missing listing link')
     parts = urlsplit(urljoin(page_url, href))
+    if source == 'komo':
+        check_url(urlunsplit(parts), source)
+        numbers = parse_qs(parts.query).get('modaaNum', [])
+        if parts.path.rstrip('/') != '/code/nadlan/details' or len(numbers) != 1 or not re.fullmatch(r'[0-9]{1,200}', numbers[0]):
+            raise ValueError('Expected a Komo listing URL with one numeric modaaNum')
+        url = urlunsplit((parts.scheme, parts.netloc, '/code/nadlan/details/', 'modaaNum=' + numbers[0], ''))
+        return url, numbers[0]
     url = urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip('/'), '', ''))
     check_url(url, source)
     identity = parts.path.rstrip('/').split('/')[-1]
@@ -62,8 +72,11 @@ def listing_url(href, source, page_url):
 
 
 def read_card(card, fields, source, page_url):
-    if source == 'yad2' and not fields:
-        item = yad2.read_card(card)
+    if source in ('yad2', 'komo') and not fields:
+        if source == 'yad2':
+            item = yad2.read_card(card)
+        else:
+            item = komo.read_card(card, page_url)
         url, identity = listing_url(item.pop('href'), source, page_url)
         item['price'] = read_price(item.pop('price_text'))
         item.update(source=source, source_id=identity, url=url)
@@ -126,6 +139,12 @@ def card_ids(cards, source, page_url, fields):
             url, identity = listing_url(href, source, page_url)
             identities.add(identity)
         return identities
+    if source == 'komo' and not fields:
+        links = cards.evaluate_all('(cards) => cards.map(card => card.querySelector("a[href*=modaaNum]")?.getAttribute("href"))')
+        for href in links:
+            url, identity = listing_url(href, source, page_url)
+            identities.add(identity)
+        return identities
     for card in cards.all():
         href = card.locator(fields['url']).first.get_attribute('href')
         url, identity = listing_url(href, source, page_url)
@@ -146,6 +165,9 @@ def collect(page, config, items, prompt=True, report=None):
     if source == 'yad2' and not config.get('fields'):
         config.setdefault('cards', yad2.CARDS)
         config.setdefault('next_page', yad2.NEXT_PAGE)
+    if source == 'komo' and not config.get('fields'):
+        config.setdefault('cards', komo.CARDS)
+        config.setdefault('next_page', komo.NEXT_PAGE)
     for name in ('cards', 'next_page'):
         if not config.get(name):
             raise ValueError('Verified selector required: ' + name)
@@ -153,7 +175,7 @@ def collect(page, config, items, prompt=True, report=None):
     filters = config.get('filters')
     if report is None:
         report = {'pages': [], 'rejected': [], 'status': 'running'}
-    if source != 'yad2' or fields:
+    if source not in ('yad2', 'komo') or fields:
         for name in ('url', 'title', 'city', 'price', 'property_type'):
             if not fields or not fields.get(name):
                 raise ValueError('Verified field selector required: ' + name)
@@ -192,7 +214,7 @@ def collect(page, config, items, prompt=True, report=None):
         for card in page_cards:
             try:
                 item = read_card(card, fields, source, page.url)
-            except yad2.PriceNotListed:
+            except (yad2.PriceNotListed, komo.PriceNotListed):
                 unpriced += 1
                 continue
             reasons = filter_reasons(item, filters, config.get('excluded_ids'))
@@ -221,6 +243,10 @@ def collect(page, config, items, prompt=True, report=None):
         if not buttons.count():
             if source == 'yad2':
                 raise RuntimeError('Yad2 next-page control missing; cannot confirm end of results')
+            if source == 'komo':
+                komo.confirm_last_page(page)
+            report['status'] = 'complete'
+            save_json(ROOT / 'filter_report.json', report)
             break
         button = buttons.first
         if not button.is_visible() or not button.is_enabled() or button.get_attribute('aria-disabled') == 'true':
@@ -282,7 +308,8 @@ def capture(page, source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--capture', choices=['yad2', 'madlan'])
+    parser.add_argument('--capture', choices=['yad2', 'madlan', 'komo'])
+    parser.add_argument('--source', choices=['yad2', 'madlan', 'komo'], help='Run only this source from the config')
     parser.add_argument('--config', type=Path, default=ROOT / 'config.json')
     parser.add_argument('--upload', action='store_true')
     parser.add_argument('--upload-file', type=Path, help='Upload an existing JSON result file without opening the browser')
@@ -309,13 +336,18 @@ def main():
                 capture(page, args.capture)
                 return
             config = json.loads(args.config.read_text(encoding='utf-8'))
+            searches = config['searches']
+            if args.source:
+                searches = [search for search in searches if search['source'] == args.source]
+                if not searches:
+                    parser.error('No search configured for ' + args.source)
             filters = None
             if config.get('filters_file'):
                 filter_path = args.config.resolve().parent / config['filters_file']
                 filters = json.loads(filter_path.read_text(encoding='utf-8'))
             items = {}
             report = {'pages': [], 'rejected': [], 'status': 'running'}
-            for search in config['searches']:
+            for search in searches:
                 search = dict(search)
                 search['filters'] = filters
                 report['status'] = 'running'

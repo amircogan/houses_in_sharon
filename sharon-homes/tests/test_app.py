@@ -115,6 +115,20 @@ class HomeTests(unittest.TestCase):
         result = self.app.upsert_many([changed], dry_run=True)
         self.assertEqual(result['identity_conflicts'][0]['existing_source_id'], 'old-id')
 
+    def test_komo_query_ids_are_distinct_and_preserve_user_state(self):
+        first = self.example() | {'source': 'komo', 'source_id': '100', 'url': 'https://www.komo.co.il/code/nadlan/details/?modaaNum=100'}
+        second = first | {'source_id': '101', 'url': 'https://www.komo.co.il/code/nadlan/details/?modaaNum=101'}
+        result = self.app.upsert_many([first, second])
+        self.assertEqual((result['added'], result['skipped']), (2, 0))
+        with self.app.db() as conn:
+            conn.execute("UPDATE homes SET favorite=1,hidden=1,note='keep' WHERE source_id='100'")
+        updated = first | {'price': 21000, 'url': first['url'] + '&tracking=ignored'}
+        self.assertEqual(self.app.upsert_many([updated])['updated'], 1)
+        with self.app.db() as conn:
+            row = conn.execute("SELECT * FROM homes WHERE source_id='100'").fetchone()
+            self.assertEqual((row['favorite'], row['hidden'], row['note'], row['price']), (1, 1, 'keep', 21000))
+            self.assertEqual(conn.execute('SELECT count(*) FROM homes').fetchone()[0], 2)
+
     def test_collect_remote_failure_isolated_and_state_preserved(self):
         from unittest.mock import patch
         self.app.upsert_many([self.example()])

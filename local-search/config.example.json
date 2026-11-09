@@ -7,6 +7,12 @@
       "max_pages": 100,
       "delay_seconds": 3,
       "excluded_ids": []
+    },
+    {
+      "source": "komo",
+      "url": "https://www.komo.co.il/code/nadlan/apartments-for-rent.asp?nehes=5&fromPrice=13000&toPrice=26000",
+      "max_pages": 100,
+      "delay_seconds": 3
     }
   ]
 }

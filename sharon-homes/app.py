@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from sources import configured_sources
 from zoneinfo import ZoneInfo
 
@@ -125,6 +125,11 @@ def import_url_key(source, url):
     if source == 'yad2' and host == 'yad2.co.il' and path.startswith('/realestate/item/'):
         # Older imports omit the region segment. The listing token is unchanged.
         path = '/realestate/item/' + path.split('/')[-1]
+    if source == 'komo' and host == 'komo.co.il' and path == '/code/nadlan/details':
+        # Komo identifies every listing by a query value on the same URL path.
+        number = parse_qs(parts.query).get('modaaNum', [''])[0]
+        if number.isdigit():
+            path += '?modaaNum=' + number
     return source, host, path
 
 

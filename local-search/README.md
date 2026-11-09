@@ -1,6 +1,6 @@
 # Local browser rental search
 
-Simple Python Playwright runner for macOS, using visible Chromium and a separate
+Simple Python Playwright runner for Yad2 and Komo on macOS, using visible Chromium and a separate
 persistent profile. No stealth plugins or CAPTCHA solving.
 
 Yad2 has a built-in adapter based on rendered rental search results captured on
@@ -207,3 +207,50 @@ Current verification after the price cap: 205 unique matches across eight pages;
 113 unique records excluded by town. All 32 automated checks pass, including
 price boundaries, filtering an older file before upload, existing database
 compatibility and location tabs combined with favorites/text search on mobile.
+
+## Komo adapter
+
+Komo's public rental page was observed on 9 November 2026. The built-in adapter
+reads `div.modaaRowAd` cards, title/city/address, numeric price, room count and
+the card image. Its explicit `וילות/ בתים` category maps to `בית פרטי`; apartments
+keep their own type and are rejected by the shared house filter. Card area does
+not distinguish building from land area, so both area fields remain null.
+
+The example config includes Komo's house filter `nehes=5` and observed price
+parameters `fromPrice=13000&toPrice=26000`. Local/server filters still enforce the
+shared town list and budget. Run just Komo with:
+
+```bash
+python search.py --source komo
+```
+
+Komo redirected page 2 to `account.komo.co.il` during the initial unsigned test.
+Sign in manually through capture mode before collection; the same ignored
+persistent profile retains the session:
+
+```bash
+python search.py --capture komo
+```
+
+Open the filtered rental results, use the next-page link, complete the sign-in,
+then press Enter once actual listings return. The collector stops on a sign-in
+redirect, page limit or missing pagination/count markup. It confirms the end
+using `#paging`, the current page and the displayed result count; it does not
+assume a missing next link proves completion.
+
+Komo listing IDs are the numeric `modaaNum` query values. Canonical listing URLs
+preserve that parameter and drop tracking values. The app must include this
+query value in its import identity checks; the older backend treated all of
+Komo's detail URLs as the same listing path. Deploy that compatibility change
+before importing Komo records.
+
+Local Chromium tests cover extraction, pagination, duplicate IDs, preserving
+apartment types, missing prices, invalid query IDs and sign-in redirects.
+Live authenticated pagination and production import need separate verification;
+fixture tests alone do not prove them.
+
+Live Komo verification (9 November 2026): after manual sign-in, the runner
+reopened the saved browser session and completed all four pages of the native
+₪13,000–₪26,000 house search. It read 62 unique listings, accepted six in the
+configured town list and rejected 56 by town. This verifies authenticated live
+pagination and card extraction for that run, not future availability of every ad.
