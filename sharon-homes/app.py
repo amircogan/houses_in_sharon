@@ -73,6 +73,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS digest_log (
           date TEXT PRIMARY KEY, sent_at TEXT NOT NULL, new_count INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS bulk_hide_undo (
+          home_id INTEGER PRIMARY KEY
+        );
         CREATE INDEX IF NOT EXISTS homes_filter_idx ON homes(hidden, city, price, first_seen);
         ''')
 
@@ -324,6 +327,7 @@ def homes(response: Response, show: str = 'active', search: str = '', _: bool = 
     response.headers['Cache-Control'] = 'no-store'
     with db() as conn:
         stored = [dict(r) for r in conn.execute('SELECT * FROM homes ORDER BY favorite DESC, first_seen DESC, id DESC')]
+        undo_count = conn.execute('SELECT count(*) FROM bulk_hide_undo JOIN homes ON homes.id=bulk_hide_undo.home_id WHERE homes.hidden=1').fetchone()[0]
     # Keep older records and their notes, but display only the current budget.
     rows = []
     for row in stored:
@@ -351,6 +355,7 @@ def homes(response: Response, show: str = 'active', search: str = '', _: bool = 
         q = search.casefold()
         rows = [r for r in rows if q in ' '.join(str(r.get(k) or '') for k in ('title','city','address','description','note')).casefold()]
     return {'items':rows,'stats':stats,'last_scan':last_scan(),
+            'bulk_hide_undo_count': undo_count,
             'filters': {'min_price': MIN_PRICE, 'max_price': MAX_PRICE},
             'location_groups': [{'id': group['id'], 'label': group['label']} for group in SEARCH_FILTERS['location_groups']]}
 
@@ -382,10 +387,26 @@ class HideNonFavorites(BaseModel):
 def hide_non_favorites(selection: HideNonFavorites, _: bool = Depends(credentials)):
     # Only the displayed IDs selected by the client; protect current favorites.
     with db() as conn:
-        result = conn.executemany('UPDATE homes SET hidden=1 WHERE id=? AND favorite=0 AND hidden=0',
-                                  [(identity,) for identity in selection.ids])
+        conn.execute('BEGIN IMMEDIATE')
+        changed = []
+        for identity in selection.ids:
+            result = conn.execute('UPDATE homes SET hidden=1 WHERE id=? AND favorite=0 AND hidden=0', (identity,))
+            if result.rowcount:
+                changed.append((identity,))
+        if changed:
+            conn.execute('DELETE FROM bulk_hide_undo')
+            conn.executemany('INSERT INTO bulk_hide_undo(home_id) VALUES (?)', changed)
+    return {'hidden': len(changed)}
+
+
+@app.post('/api/homes/undo-last-hide')
+def undo_last_hide(_: bool = Depends(credentials)):
+    with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        result = conn.execute('UPDATE homes SET hidden=0 WHERE hidden=1 AND id IN (SELECT home_id FROM bulk_hide_undo)')
         count = result.rowcount
-    return {'hidden': count}
+        conn.execute('DELETE FROM bulk_hide_undo')
+    return {'restored': count}
 
 
 @app.patch('/api/homes/{home_id}')
@@ -401,6 +422,9 @@ def edit(home_id: int, change: Edit, _:bool = Depends(credentials)):
         if not row:
             raise HTTPException(404,'Not found')
         conn.execute('UPDATE homes SET '+', '.join(f'{k}=?' for k in values)+' WHERE id=?',list(values.values())+[home_id])
+        if 'hidden' in values:
+            # Undo must not overwrite a later manual visibility decision.
+            conn.execute('DELETE FROM bulk_hide_undo WHERE home_id=?', (home_id,))
     return {'ok':True}
 
 

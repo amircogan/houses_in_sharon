@@ -70,6 +70,38 @@ class HomeTests(unittest.TestCase):
         self.assertEqual(result['added'],1)
         self.assertEqual(result['skipped'],2)
 
+    def test_undo_bulk_hide_survives_restart_and_preserves_later_manual_changes(self):
+        from fastapi.testclient import TestClient
+        records = [self.example() | {'source_id': name, 'url': 'https://example.org/' + name}
+                   for name in ('first', 'second', 'favorite', 'older-hidden')]
+        self.app.upsert_many(records)
+        with self.app.db() as conn:
+            conn.execute("UPDATE homes SET favorite=1 WHERE source_id='favorite'")
+            conn.execute("UPDATE homes SET hidden=1 WHERE source_id='older-hidden'")
+            conn.execute("UPDATE homes SET note='preserve'")
+            ids = {row['source_id']: row['id'] for row in conn.execute('SELECT id,source_id FROM homes')}
+        auth = ('homes', 'a-password')
+        with TestClient(self.app.app) as client:
+            self.assertEqual(client.post('/api/homes/undo-last-hide').status_code, 401)
+            client.post('/api/homes/hide-non-favorites', json={'ids': [ids['first']]}, auth=auth)
+            client.post('/api/homes/hide-non-favorites', json={'ids': [ids['favorite']]}, auth=auth)
+            self.app.init_db()
+            self.app.upsert_many([records[0] | {'price': 22000}])
+            self.assertEqual(client.get('/api/homes?show=all', auth=auth).json()['bulk_hide_undo_count'], 1)
+            self.assertEqual(client.post('/api/homes/undo-last-hide', auth=auth).json(), {'restored': 1})
+            self.assertEqual(client.post('/api/homes/undo-last-hide', auth=auth).json(), {'restored': 0})
+            client.post('/api/homes/hide-non-favorites', json={'ids': [ids['first']]}, auth=auth)
+            client.post('/api/homes/hide-non-favorites', json={'ids': [ids['second']]}, auth=auth)
+            self.assertEqual(client.post('/api/homes/undo-last-hide', auth=auth).json(), {'restored': 1})
+            client.post('/api/homes/hide-non-favorites', json={'ids': [ids['second']]}, auth=auth)
+            client.patch('/api/homes/' + str(ids['second']), json={'hidden': False}, auth=auth)
+            client.patch('/api/homes/' + str(ids['second']), json={'hidden': True}, auth=auth)
+            self.assertEqual(client.post('/api/homes/undo-last-hide', auth=auth).json(), {'restored': 0})
+        with self.app.db() as conn:
+            rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM homes')}
+        self.assertEqual([rows[name]['hidden'] for name in ('first', 'second', 'favorite', 'older-hidden')], [1, 1, 0, 1])
+        self.assertTrue(all(row['note'] == 'preserve' for row in rows.values()))
+
     def test_price_bounds_include_13000_and_26000(self):
         examples = [self.example() | {'source_id': 'floor', 'url': 'https://example.org/floor', 'price': 13000},
                     self.example() | {'source_id': 'ceiling', 'url': 'https://example.org/ceiling', 'price': 26000},
