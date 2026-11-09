@@ -54,13 +54,16 @@ class BrowserTests(unittest.TestCase):
 
     def respond(self, route):
         html = self.pages.get(route.request.url)
+        if html is None and '/static/' in route.request.url:
+            html = self.pages.get(route.request.url.split('?', 1)[0])
         if html is None:
             route.abort()
         else:
             content_type = 'text/html; charset=utf-8'
-            if route.request.url.endswith('.js'):
+            path = route.request.url.split('?', 1)[0]
+            if path.endswith('.js'):
                 content_type = 'application/javascript; charset=utf-8'
-            elif route.request.url.endswith('.css'):
+            elif path.endswith('.css'):
                 content_type = 'text/css; charset=utf-8'
             route.fulfill(status=200, content_type=content_type, body=html)
 
@@ -201,5 +204,14 @@ class BrowserTests(unittest.TestCase):
         self.page.locator('#search').fill('')
         self.assertEqual(self.page.locator('.home').count(), 1)
         self.assertEqual(self.page.locator('[data-location="herzliya"]').get_attribute('aria-pressed'), 'true')
+
+        def fail_bulk_request(route):
+            route.fulfill(status=500, content_type='application/json', body='{"detail":"test failure"}')
+
+        self.page.route('**/api/homes/hide-non-favorites', fail_bulk_request)
+        self.page.locator('#hideNonFavorites').click()
+        self.page.wait_for_function('document.querySelector("#message").textContent.includes("ההסתרה נכשלה")')
+        self.assertTrue(self.page.locator('#hideNonFavorites').is_enabled())
+        self.assertEqual(self.page.locator('.home').count(), 1)
         self.page.set_viewport_size({'width': 375, 'height': 812})
         self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'))

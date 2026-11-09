@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 from sources import configured_sources
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -316,11 +316,12 @@ def startup():
 
 @app.get('/', response_class=HTMLResponse)
 def index(_: bool = Depends(credentials)):
-    return FileResponse(ROOT / 'static' / 'index.html')
+    return FileResponse(ROOT / 'static' / 'index.html', headers={'Cache-Control': 'no-cache'})
 
 
 @app.get('/api/homes')
-def homes(show: str = 'active', search: str = '', _: bool = Depends(credentials)):
+def homes(response: Response, show: str = 'active', search: str = '', _: bool = Depends(credentials)):
+    response.headers['Cache-Control'] = 'no-store'
     with db() as conn:
         stored = [dict(r) for r in conn.execute('SELECT * FROM homes ORDER BY favorite DESC, first_seen DESC, id DESC')]
     # Keep older records and their notes, but display only the current budget.
@@ -371,6 +372,15 @@ class Edit(BaseModel):
     hidden: bool | None = None
     favorite: bool | None = None
     note: str | None = Field(default=None, max_length=10000)
+
+
+@app.post('/api/homes/hide-non-favorites')
+def hide_non_favorites(_: bool = Depends(credentials)):
+    # One transaction across all sources/towns; keep favorites and notes intact.
+    with db() as conn:
+        result = conn.execute('UPDATE homes SET hidden=1 WHERE favorite=0 AND hidden=0')
+        count = result.rowcount
+    return {'hidden': count}
 
 
 @app.patch('/api/homes/{home_id}')

@@ -20,7 +20,7 @@ import app
 
 class ImportFlowTests(unittest.TestCase):
     def test_extract_upload_reimport_and_conflict_over_http(self):
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, expect
         from test_browser import card
         with tempfile.TemporaryDirectory() as folder, patch.object(app, 'DB_PATH', Path(folder) / 'homes.sqlite'), patch.dict(os.environ, {
             'APP_PASSWORD': '', 'ALLOW_LOCAL_NO_PASSWORD': '1',
@@ -84,6 +84,42 @@ class ImportFlowTests(unittest.TestCase):
                 records[0]['source_id'] = 'wrong-id'
                 conflict = search.upload(records[:1], origin, dry_run=True)
                 self.assertEqual(conflict['identity_conflicts'][0]['existing_source_id'], 'house')
+                extra = [records[0] | {'source_id': 'keep-favorite', 'url': 'https://www.yad2.co.il/realestate/item/keepfavorite'},
+                         records[0] | {'source_id': 'hide-yad2', 'url': 'https://www.yad2.co.il/realestate/item/hideyad2'},
+                         records[0] | {'source': 'komo', 'source_id': '123', 'url': 'https://www.komo.co.il/code/nadlan/details/?modaaNum=123', 'city': 'הרצליה'}]
+                self.assertEqual(search.upload(extra, origin)['added'], 3)
+                with app.db() as conn:
+                    conn.execute("UPDATE homes SET favorite=1,note='keep favorite' WHERE source_id='keep-favorite'")
+                    conn.execute("UPDATE homes SET note='keep hidden note' WHERE source_id='hide-yad2'")
+                with sync_playwright() as p:
+                    browser = p.chromium.launch()
+                    page = browser.new_page(viewport={'width': 375, 'height': 812})
+                    page.goto(origin)
+                    expect(page.locator('.home')).to_have_count(3)
+                    page.select_option('#sourceFilter', 'komo')
+                    expect(page.locator('.home')).to_have_count(1)
+                    self.assertEqual(page.locator('.source-tag').inner_text(), 'קומו')
+                    page.locator('[data-location="herzliya"]').click()
+                    page.locator('#hideNonFavorites').click()
+                    expect(page.locator('#message')).to_contain_text('הוסתרו 2')
+                    expect(page.locator('#hideNonFavorites')).to_be_enabled()
+                    page.select_option('#sourceFilter', 'all')
+                    page.locator('[data-location="all"]').click()
+                    expect(page.locator('.home')).to_have_count(1)
+                    expect(page.locator('.heart')).to_have_class('heart saved')
+                    page.reload()
+                    expect(page.locator('.home')).to_have_count(1)
+                    self.assertEqual(page.locator('#activeCount').inner_text(), '1')
+                    self.assertEqual(page.locator('#favoritesCount').inner_text(), '1')
+                    page.locator('[data-mode="hidden"]').click()
+                    page.select_option('#sourceFilter', 'komo')
+                    expect(page.locator('.home')).to_have_count(1)
+                    self.assertEqual(page.locator('.source-tag').inner_text(), 'קומו')
+                    self.assertTrue(page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'))
+                    browser.close()
+                with app.db() as conn:
+                    self.assertEqual(conn.execute("SELECT note FROM homes WHERE source_id='hide-yad2'").fetchone()[0], 'keep hidden note')
+                    self.assertEqual(conn.execute('SELECT count(*) FROM homes').fetchone()[0], 4)
                 smtp.assert_not_called()
             finally:
                 server.should_exit = True
