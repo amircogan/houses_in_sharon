@@ -115,6 +115,21 @@ class BrowserTests(unittest.TestCase):
         self.collect(items)
         self.assertEqual(list(items), ['yad2:one'])
 
+    def test_cards_moving_during_read_keep_their_listing_identity(self):
+        self.pages[URL] = card('one') + card('two') + card('three') + pagination(True)
+        original = search.read_card
+
+        def read_and_remove_first(element, fields, source, page_url):
+            item = original(element, fields, source, page_url)
+            if item['source_id'] == 'one':
+                element.evaluate('(element) => element.remove()')
+            return item
+
+        items = {}
+        with patch('search.read_card', side_effect=read_and_remove_first):
+            self.collect(items)
+        self.assertEqual(set(items), {'yad2:one', 'yad2:two', 'yad2:three'})
+
     def test_madlan_without_verified_selectors_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Verified selector required'):
             search.collect(self.page, {'source': 'madlan', 'url': 'https://www.madlan.co.il/for-rent'}, {}, prompt=False)

@@ -119,11 +119,15 @@ def filter_reasons(item, filters, excluded_ids=None):
 
 def card_ids(cards, source, page_url, fields):
     identities = set()
+    if source == 'yad2' and not fields:
+        # Read every href in one browser call; promoted cards can move or vanish.
+        links = cards.evaluate_all('(cards) => cards.map(card => card.getAttribute("href"))')
+        for href in links:
+            url, identity = listing_url(href, source, page_url)
+            identities.add(identity)
+        return identities
     for card in cards.all():
-        if source == 'yad2' and not fields:
-            href = card.get_attribute('href')
-        else:
-            href = card.locator(fields['url']).first.get_attribute('href')
+        href = card.locator(fields['url']).first.get_attribute('href')
         url, identity = listing_url(href, source, page_url)
         identities.add(identity)
     return identities
@@ -177,7 +181,15 @@ def collect(page, config, items, prompt=True, report=None):
         page_items = {}
         rejected = []
         unpriced = 0
-        for card in cards.all():
+        if source == 'yad2' and not fields:
+            links = cards.evaluate_all('(cards) => cards.map(card => card.getAttribute("href"))')
+            page_cards = []
+            for href in links:
+                link = page.locator('[href=' + json.dumps(href) + ']')
+                page_cards.append(cards.and_(link).first)
+        else:
+            page_cards = cards.all()
+        for card in page_cards:
             try:
                 item = read_card(card, fields, source, page.url)
             except yad2.PriceNotListed:
