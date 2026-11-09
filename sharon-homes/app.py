@@ -18,15 +18,17 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv('DB_PATH', str(ROOT / 'data' / 'homes.sqlite')))
 TZ = ZoneInfo('Asia/Jerusalem')
-MIN_PRICE = int(os.getenv('MIN_PRICE', '15000'))
-MAX_PRICE = int(os.getenv('MAX_PRICE', '25000'))
-ALLOWED_CITIES = {s.strip() for s in os.getenv('ALLOWED_CITIES', 'בצרה,בני ציון,רשפון,געש,רמות השבים,גן חיים,חרות,כפר הס,תל מונד,קדימה צורן,כפר יונה,אבן יהודה,כפר נטר,בית יהושע,אודים,יקום,שפיים,כפר שמריהו,רעננה,כפר סבא,הוד השרון,הרצליה,רמת השרון,גני עם,ירקונה,עדנים,נווה ירק,שדה ורבורג,צופית,ניר אליהו,בני דרור,עין ורד,עין שריד,משמרת,פורת,כפר מלל,כפר מעש,גבעת חן,מגשימים,צור משה,תל יצחק,נטעים,בית יצחק-שער חפר,בית יצחק').split(',') if s.strip()}
-ALLOWED_TYPES = {'בית פרטי','וילה','קוטג׳','קוטג\'','דו משפחתי','בית במושב','בית'}
+SEARCH_FILTERS = json.loads((ROOT / 'search_filters.json').read_text(encoding='utf-8'))
+MIN_PRICE = int(os.getenv('MIN_PRICE', str(SEARCH_FILTERS['min_price'])))
+maximum = os.getenv('MAX_PRICE', '')
+MAX_PRICE = int(maximum) if maximum else SEARCH_FILTERS['max_price']
+ALLOWED_CITIES = {s.strip() for s in os.getenv('ALLOWED_CITIES', ','.join(SEARCH_FILTERS['allowed_cities'])).split(',') if s.strip()}
+ALLOWED_TYPES = set(SEARCH_FILTERS['allowed_property_types'])
 app = FastAPI(title='בתים בשרון')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
 
@@ -102,7 +104,7 @@ class Listing(BaseModel):
     title: str = Field(min_length=2, max_length=400)
     city: str = Field(min_length=2, max_length=100)
     address: str = Field(default='', max_length=300)
-    property_type: str = 'בית פרטי'
+    property_type: str = Field(min_length=1, max_length=100)
     price: int = Field(gt=0)
     rooms: float | None = None
     built_sqm: float | None = None
@@ -116,17 +118,60 @@ def https_url(value):
     return parts.scheme == 'https' and bool(parts.hostname) and not parts.username and not parts.password
 
 
-def upsert_many(records):
+def import_url_key(source, url):
+    parts = urlsplit(url)
+    host = (parts.hostname or '').removeprefix('www.')
+    path = parts.path.rstrip('/')
+    if source == 'yad2' and host == 'yad2.co.il' and path.startswith('/realestate/item/'):
+        # Older imports omit the region segment. The listing token is unchanged.
+        path = '/realestate/item/' + path.split('/')[-1]
+    return source, host, path
+
+
+def upsert_many(records, dry_run=False):
     added = updated = skipped = 0
+    rejected = []
+    identity_conflicts = []
     stamp = now().isoformat(timespec='seconds')
     with db() as conn:
-        for record in records:
+        existing = {}
+        known_ids = set()
+        for row in conn.execute('SELECT source,source_id,url FROM homes'):
+            existing[import_url_key(row['source'], row['url'])] = row['source_id']
+            known_ids.add((row['source'], row['source_id']))
+        for index, record in enumerate(records):
             try:
                 item = Listing.model_validate(record)
-                if not (MIN_PRICE <= item.price <= MAX_PRICE) or item.city not in ALLOWED_CITIES or item.property_type not in ALLOWED_TYPES or not https_url(item.url):
+                reason = ''
+                if not https_url(item.url):
+                    reason = 'invalid_url'
+                elif item.price < MIN_PRICE or (MAX_PRICE is not None and item.price > MAX_PRICE):
+                    reason = 'price_out_of_range'
+                elif item.city not in ALLOWED_CITIES:
+                    reason = 'city_not_allowed'
+                elif item.property_type not in ALLOWED_TYPES:
+                    reason = 'property_type_not_allowed'
+                url_key = import_url_key(item.source, item.url)
+                existing_id = existing.get(url_key)
+                if existing_id is not None and existing_id != item.source_id:
+                    reason = 'identity_conflict'
+                    identity_conflicts.append({'index': index, 'source': item.source,
+                                               'source_id': item.source_id, 'existing_source_id': existing_id})
+                if reason:
                     skipped += 1
+                    rejected.append({'index': index, 'source_id': item.source_id, 'reason': reason})
                     continue
                 images = [s for s in item.images if https_url(s)]
+                key = (item.source, item.source_id)
+                is_update = key in known_ids
+                known_ids.add(key)
+                existing[url_key] = item.source_id
+                if dry_run:
+                    if is_update:
+                        updated += 1
+                    else:
+                        added += 1
+                    continue
                 old = conn.execute('SELECT id FROM homes WHERE source=? AND source_id=?', (item.source,item.source_id)).fetchone()
                 if old:
                     conn.execute('''UPDATE homes SET url=?,title=?,city=?,address=?,property_type=?,price=?,rooms=?,built_sqm=?,lot_sqm=?,description=?,images=?,last_seen=? WHERE id=?''',
@@ -137,9 +182,15 @@ def upsert_many(records):
                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                                  (item.source,item.source_id,item.url,item.title,item.city,item.address,item.property_type,item.price,item.rooms,item.built_sqm,item.lot_sqm,item.description,json.dumps(images,ensure_ascii=False),stamp,stamp))
                     added += 1
-            except Exception:
+            except (ValidationError, ValueError, TypeError):
                 skipped += 1
-    return {'added':added,'updated':updated,'skipped':skipped}
+                rejected.append({'index': index, 'reason': 'invalid_record'})
+    result = {'added':added,'updated':updated,'skipped':skipped}
+    if dry_run:
+        result['dry_run'] = True
+    result['rejected'] = rejected
+    result['identity_conflicts'] = identity_conflicts
+    return result
 
 
 def read_feed_file(path):
@@ -265,23 +316,49 @@ def index(_: bool = Depends(credentials)):
 
 @app.get('/api/homes')
 def homes(show: str = 'active', search: str = '', _: bool = Depends(credentials)):
-    condition = '' if show == 'all' else 'WHERE hidden = 1' if show == 'hidden' else 'WHERE hidden = 0'
     with db() as conn:
-        rows = [dict(r) for r in conn.execute(f'SELECT * FROM homes {condition} ORDER BY favorite DESC, first_seen DESC, id DESC').fetchall()]
-        stats = dict(conn.execute('SELECT count(*) total, sum(CASE WHEN hidden=0 THEN 1 ELSE 0 END) active, sum(CASE WHEN favorite=1 AND hidden=0 THEN 1 ELSE 0 END) saved FROM homes').fetchone())
-        date, start, end = previous_day_bounds()
-        stats['yesterday'] = conn.execute('SELECT count(*) FROM homes WHERE first_seen>=? AND first_seen<?',(start,end)).fetchone()[0]
+        stored = [dict(r) for r in conn.execute('SELECT * FROM homes ORDER BY favorite DESC, first_seen DESC, id DESC')]
+    # Keep older records and their notes, but display only the current budget.
+    rows = []
+    for row in stored:
+        if row['price'] < MIN_PRICE or (MAX_PRICE is not None and row['price'] > MAX_PRICE):
+            continue
+        if row['city'] not in ALLOWED_CITIES or row['property_type'] not in ALLOWED_TYPES:
+            continue
+        rows.append(row)
+    date, start, end = previous_day_bounds()
+    stats = {'total': len(rows), 'active': 0, 'saved': 0, 'yesterday': 0}
+    for row in rows:
+        if not row['hidden']:
+            stats['active'] += 1
+            if row['favorite']:
+                stats['saved'] += 1
+        if start <= row['first_seen'] < end:
+            stats['yesterday'] += 1
+    if show != 'all':
+        hidden = show == 'hidden'
+        rows = [row for row in rows if bool(row['hidden']) == hidden]
     for r in rows:
         r['images'] = json.loads(r['images'])
+        r['location_group'] = location_group(r['city'])
     if search:
         q = search.casefold()
         rows = [r for r in rows if q in ' '.join(str(r.get(k) or '') for k in ('title','city','address','description','note')).casefold()]
-    return {'items':rows,'stats':stats,'last_scan':last_scan()}
+    return {'items':rows,'stats':stats,'last_scan':last_scan(),
+            'filters': {'min_price': MIN_PRICE, 'max_price': MAX_PRICE},
+            'location_groups': [{'id': group['id'], 'label': group['label']} for group in SEARCH_FILTERS['location_groups']]}
+
+
+def location_group(city):
+    for group in SEARCH_FILTERS['location_groups']:
+        if city in group['cities']:
+            return group['id']
+    return 'other'
 
 
 def last_scan():
     with db() as conn:
-        row = conn.execute("SELECT start_time,finish_time,status,added FROM runs WHERE source IN ('daily','search') ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute("SELECT start_time,finish_time,status,added FROM runs WHERE source IN ('daily','search','import') ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
 
@@ -307,10 +384,24 @@ def edit(home_id: int, change: Edit, _:bool = Depends(credentials)):
     return {'ok':True}
 
 
+@app.get('/api/import')
+def import_capabilities(_:bool = Depends(credentials)):
+    return {'supports_dry_run': True, 'required_fields': [
+        'source', 'source_id', 'url', 'title', 'city', 'property_type', 'price'],
+        'min_price': MIN_PRICE, 'max_price': MAX_PRICE,
+        'allowed_cities': sorted(ALLOWED_CITIES), 'allowed_property_types': sorted(ALLOWED_TYPES)}
+
+
 @app.post('/api/import')
-def ingest(payload: list[Listing], _:bool = Depends(credentials)):
+def ingest(payload: list[Listing], dry_run: bool = False, _:bool = Depends(credentials)):
     # Authenticated endpoint for permitted-source exports. Not intended for public ingestion.
-    return upsert_many([x.model_dump() for x in payload])
+    started = now().isoformat(timespec='seconds')
+    result = upsert_many([x.model_dump() for x in payload], dry_run=dry_run)
+    if not dry_run:
+        with db() as conn:
+            conn.execute('INSERT INTO runs(start_time,finish_time,source,added,updated,status) VALUES (?,?,?,?,?,?)',
+                         (started, now().isoformat(timespec='seconds'), 'import', result['added'], result['updated'], 'ok'))
+    return result
 
 
 @app.post('/api/scan')

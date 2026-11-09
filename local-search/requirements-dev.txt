@@ -1,0 +1,2 @@
+-r requirements.txt
+-r ../sharon-homes/requirements-dev.txt

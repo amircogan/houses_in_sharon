@@ -3,4 +3,7 @@ __pycache__/
 profile/
 captures/
 results.json
+results.tmp
+filter_report.json
+filter_report.tmp
 config.json

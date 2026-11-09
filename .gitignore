@@ -1,0 +1,4 @@
+__pycache__/
+.venv/
+sharon-homes/data/
+.DS_Store

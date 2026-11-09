@@ -1,13 +1,12 @@
 {
+  "filters_file": "../sharon-homes/search_filters.json",
   "searches": [
     {
       "source": "yad2",
-      "url": "https://www.yad2.co.il/realestate/rent",
-      "max_pages": 5,
+      "url": "https://www.yad2.co.il/realestate/rent/center-and-sharon?property=5,39&minPrice=13000&maxPrice=26000",
+      "max_pages": 100,
       "delay_seconds": 3,
-      "cards": "",
-      "next_page": "",
-      "fields": {"url": "", "title": "", "city": "", "price": "", "property_type": "", "address": "", "description": "", "images": ""}
+      "excluded_ids": []
     }
   ]
 }
