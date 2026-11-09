@@ -26,7 +26,7 @@ class HomeTests(unittest.TestCase):
             r=c.execute('SELECT * FROM homes').fetchone()
             self.assertEqual((r['hidden'],r['note'],r['price']),(1,'לבקר בהמשך',21000))
 
-    def test_bulk_hide_is_global_preserves_favorites_and_survives_reimport(self):
+    def test_bulk_hide_only_selected_ids_preserves_favorites_and_survives_reimport(self):
         from fastapi.testclient import TestClient
         records = []
         for identity in ('favorite', 'hidden-favorite', 'yad2', 'komo', 'already-hidden', 'old-budget'):
@@ -40,23 +40,29 @@ class HomeTests(unittest.TestCase):
             conn.execute("UPDATE homes SET hidden=1 WHERE source_id IN ('hidden-favorite','already-hidden')")
             conn.execute("UPDATE homes SET price=30000 WHERE source_id='old-budget'")
             conn.execute("UPDATE homes SET note='keep notes'")
+            ids = {row['source_id']: row['id'] for row in conn.execute('SELECT id,source_id FROM homes')}
+        selection = {'ids': [ids['favorite'], ids['hidden-favorite'], ids['yad2']]}
         with TestClient(self.app.app) as client:
             self.assertEqual(client.post('/api/homes/hide-non-favorites').status_code, 401)
             self.assertEqual(client.get('/', auth=('homes', 'a-password')).headers['cache-control'], 'no-cache')
-            result = client.post('/api/homes/hide-non-favorites', auth=('homes', 'a-password'))
-            self.assertEqual(result.json(), {'hidden': 3})
-            self.assertEqual(client.post('/api/homes/hide-non-favorites', auth=('homes', 'a-password')).json(), {'hidden': 0})
+            self.assertEqual(client.post('/api/homes/hide-non-favorites', auth=('homes', 'a-password')).status_code, 422)
+            result = client.post('/api/homes/hide-non-favorites', json=selection, auth=('homes', 'a-password'))
+            self.assertEqual(result.json(), {'hidden': 1})
+            self.assertEqual(client.post('/api/homes/hide-non-favorites', json=selection, auth=('homes', 'a-password')).json(), {'hidden': 0})
+            self.assertEqual(client.post('/api/homes/hide-non-favorites', json={'ids': []}, auth=('homes', 'a-password')).json(), {'hidden': 0})
             response = client.get('/api/homes', auth=('homes', 'a-password'))
             self.assertEqual(response.headers['cache-control'], 'no-store')
-            self.assertEqual([row['source_id'] for row in response.json()['items']], ['favorite'])
+            self.assertEqual({row['source_id'] for row in response.json()['items']}, {'favorite', '123'})
         self.app.upsert_many([records[2] | {'price': 22000}])
         with self.app.db() as conn:
             rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM homes')}
         self.assertEqual(len(rows), 6)
         self.assertEqual((rows['favorite']['favorite'], rows['favorite']['hidden']), (1, 0))
         self.assertEqual((rows['hidden-favorite']['favorite'], rows['hidden-favorite']['hidden']), (1, 1))
-        for identity in ('yad2', '123', 'already-hidden', 'old-budget'):
+        for identity in ('yad2', 'already-hidden'):
             self.assertEqual(rows[identity]['hidden'], 1)
+        for identity in ('123', 'old-budget'):
+            self.assertEqual(rows[identity]['hidden'], 0)
         self.assertTrue(all(row['note'] == 'keep notes' for row in rows.values()))
     def test_filter(self):
         examples=[self.example()|{'source_id':'2','price':12000},self.example()|{'source_id':'3','city':'חיפה'},self.example()]

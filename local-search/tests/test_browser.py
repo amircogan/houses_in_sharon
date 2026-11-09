@@ -205,13 +205,22 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator('.home').count(), 1)
         self.assertEqual(self.page.locator('[data-location="herzliya"]').get_attribute('aria-pressed'), 'true')
 
+        bulk_requests = []
+
         def fail_bulk_request(route):
+            bulk_requests.append(route.request.post_data_json)
             route.fulfill(status=500, content_type='application/json', body='{"detail":"test failure"}')
 
         self.page.route('**/api/homes/hide-non-favorites', fail_bulk_request)
         self.page.locator('#hideNonFavorites').click()
+        self.assertEqual(bulk_requests, [])
+        self.assertIn('אין מודעות', self.page.locator('#message').inner_text())
+        self.page.locator('[data-mode="active"]').click()
+        self.page.locator('[data-location="all"]').click()
+        self.page.locator('#hideNonFavorites').click()
         self.page.wait_for_function('document.querySelector("#message").textContent.includes("ההסתרה נכשלה")')
         self.assertTrue(self.page.locator('#hideNonFavorites').is_enabled())
-        self.assertEqual(self.page.locator('.home').count(), 1)
+        self.assertEqual(self.page.locator('.home').count(), 7)
+        self.assertEqual(len(bulk_requests[0]['ids']), 6)
         self.page.set_viewport_size({'width': 375, 'height': 812})
         self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'))

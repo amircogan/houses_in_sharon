@@ -374,11 +374,16 @@ class Edit(BaseModel):
     note: str | None = Field(default=None, max_length=10000)
 
 
+class HideNonFavorites(BaseModel):
+    ids: list[int] = Field(max_length=10000)
+
+
 @app.post('/api/homes/hide-non-favorites')
-def hide_non_favorites(_: bool = Depends(credentials)):
-    # One transaction across all sources/towns; keep favorites and notes intact.
+def hide_non_favorites(selection: HideNonFavorites, _: bool = Depends(credentials)):
+    # Only the displayed IDs selected by the client; protect current favorites.
     with db() as conn:
-        result = conn.execute('UPDATE homes SET hidden=1 WHERE favorite=0 AND hidden=0')
+        result = conn.executemany('UPDATE homes SET hidden=1 WHERE id=? AND favorite=0 AND hidden=0',
+                                  [(identity,) for identity in selection.ids])
         count = result.rowcount
     return {'hidden': count}
 

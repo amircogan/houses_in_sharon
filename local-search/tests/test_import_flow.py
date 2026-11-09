@@ -85,7 +85,7 @@ class ImportFlowTests(unittest.TestCase):
                 conflict = search.upload(records[:1], origin, dry_run=True)
                 self.assertEqual(conflict['identity_conflicts'][0]['existing_source_id'], 'house')
                 extra = [records[0] | {'source_id': 'keep-favorite', 'url': 'https://www.yad2.co.il/realestate/item/keepfavorite'},
-                         records[0] | {'source_id': 'hide-yad2', 'url': 'https://www.yad2.co.il/realestate/item/hideyad2'},
+                         records[0] | {'source_id': 'hide-yad2', 'title': 'בית לבדיקה בתצוגה', 'url': 'https://www.yad2.co.il/realestate/item/hideyad2'},
                          records[0] | {'source': 'komo', 'source_id': '123', 'url': 'https://www.komo.co.il/code/nadlan/details/?modaaNum=123', 'city': 'הרצליה'}]
                 self.assertEqual(search.upload(extra, origin)['added'], 3)
                 with app.db() as conn:
@@ -101,10 +101,20 @@ class ImportFlowTests(unittest.TestCase):
                     self.assertEqual(page.locator('.source-tag').inner_text(), 'קומו')
                     page.locator('[data-location="herzliya"]').click()
                     page.locator('#hideNonFavorites').click()
-                    expect(page.locator('#message')).to_contain_text('הוסתרו 2')
+                    expect(page.locator('#message')).to_contain_text('הוסתרו 1')
                     expect(page.locator('#hideNonFavorites')).to_be_enabled()
                     page.select_option('#sourceFilter', 'all')
                     page.locator('[data-location="all"]').click()
+                    expect(page.locator('.home')).to_have_count(2)
+                    expect(page.locator('.heart.saved')).to_have_count(1)
+                    page.select_option('#sourceFilter', 'yad2')
+                    page.locator('[data-location="other"]').click()
+                    page.locator('#search').fill('בית לבדיקה בתצוגה')
+                    expect(page.locator('.home')).to_have_count(1)
+                    page.locator('#hideNonFavorites').click()
+                    expect(page.locator('#message')).to_contain_text('הוסתרו 1')
+                    expect(page.locator('.home')).to_have_count(0)
+                    page.locator('#search').fill('')
                     expect(page.locator('.home')).to_have_count(1)
                     expect(page.locator('.heart')).to_have_class('heart saved')
                     page.reload()
